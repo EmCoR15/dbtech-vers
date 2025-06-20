@@ -52,6 +52,36 @@ public class VersicherungService implements IVersicherungService {
         if (!isDeckungsbetragGueltig(deckungsartId, deckungsbetrag)) {
             throw new UngueltigerDeckungsbetragException(deckungsbetrag);
         }
+        //check5
+        if (!isPreisVorhanden(deckungsartId, deckungsbetrag)) {
+            throw new DeckungspreisNichtVorhandenException(deckungsbetrag);
+        }
+        //check6
+        if (!isDeckungRegelkonform(vertragsId, deckungsartId, deckungsbetrag)) {
+            throw new DeckungsartNichtRegelkonformException(deckungsartId);
+        }
+
+        /**
+         * Insert the coverage into the database.
+         *
+         * @param vertragsId     The ID of the contract.
+         * @param deckungsartId  The ID of the coverage type.
+         * @param deckungsbetrag The coverage amount.
+         */
+        String sql = """
+    INSERT INTO deckung (vertrag_fk, deckungsart_fk, deckungsbetrag)
+    VALUES (?, ?, ?)
+""";
+
+        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
+            ps.setInt(1, vertragsId);
+            ps.setInt(2, deckungsartId);
+            ps.setBigDecimal(3, deckungsbetrag);
+            ps.executeUpdate();
+            L.info("Deckung erfolgreich gespeichert.");
+        } catch (Exception ex) {
+            throw new DataException("Fehler beim Einfügen der Deckung", ex);
+        }
     }
 
     /**
@@ -123,6 +153,13 @@ public class VersicherungService implements IVersicherungService {
         }
     }
 
+    /**
+     * Checks if the coverage amount is valid for the given coverage type.
+     *
+     * @param deckungsartId The ID of the coverage type.
+     * @param deckungsbetrag The coverage amount to check.
+     * @return true if the coverage amount is valid, false otherwise.
+     */
     public boolean isDeckungsbetragGueltig(Integer deckungsartId, BigDecimal deckungsbetrag) {
         String sql = """
         SELECT COUNT(*) 
@@ -140,4 +177,125 @@ public class VersicherungService implements IVersicherungService {
         }
     }
 
+    /**
+     * Checks if a price exists for the given coverage type and amount.
+     *
+     * @param deckungsartId The ID of the coverage type.
+     * @param deckungsbetrag The coverage amount to check.
+     * @return true if a price exists, false otherwise.
+     */
+    public boolean isPreisVorhanden(Integer deckungsartId, BigDecimal deckungsbetrag) {
+        String sql = """
+        SELECT COUNT(*) 
+        FROM deckungspreis p
+        JOIN deckungsbetrag db ON p.deckungsbetrag_fk = db.id
+        WHERE db.deckungsart_fk = ? 
+          AND db.deckungsbetrag = ? 
+          AND p.gueltig_bis >= SYSDATE
+        """;
+
+        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
+            ps.setInt(1, deckungsartId);
+            ps.setBigDecimal(2, deckungsbetrag);
+            try (ResultSet rs = ps.executeQuery()) {
+                return rs.next() && rs.getInt(1) > 0;
+            }
+        } catch (Exception ex) {
+            throw new DataException(ex);
+        }
+    }
+
+    /**
+     * Checks if the coverage is compliant with the rejection rules.
+     *
+     * @param vertragsId     The ID of the contract.
+     * @param deckungsartId  The ID of the coverage type.
+     * @param deckungsbetrag The coverage amount to check.
+     * @return true if the coverage is compliant, false otherwise.
+     */
+    public boolean isDeckungRegelkonform(Integer vertragsId, Integer deckungsartId, BigDecimal deckungsbetrag) {
+        String sql = """
+        SELECT r.r_betrag, r.r_alter, k.geburtsdatum
+        FROM vertrag v
+        JOIN kunde k ON v.kunde_fk = k.id
+        JOIN ablehnungsregel r ON r.deckungsart_fk = ?
+        WHERE v.id = ?
+        """;
+
+        try (PreparedStatement ps = useConnection().prepareStatement(sql)) {
+            ps.setInt(1, deckungsartId);
+            ps.setInt(2, vertragsId);
+
+            try (ResultSet rs = ps.executeQuery()) {
+                while (rs.next()) {
+                    String rBetrag = rs.getString("r_betrag");
+                    String rAlter = rs.getString("r_alter");
+                    java.sql.Date geburtsdatum = rs.getDate("geburtsdatum");
+
+                    int alter = calculateAge(geburtsdatum.toLocalDate());
+
+                    boolean betragErfuellt = evaluateCondition(rBetrag, deckungsbetrag);
+                    boolean alterErfuellt = evaluateCondition(rAlter, new BigDecimal(alter));
+
+                    if (betragErfuellt && alterErfuellt) {
+                        return false; // Regel nicht konform
+                    }
+                }
+                return true; // alle Regeln OK
+            }
+
+        } catch (Exception ex) {
+            throw new DataException(ex);
+        }
+    }
+
+
+
+    //Hilfsmethoden
+
+    /**
+     * Berechnet das Alter basierend auf dem Geburtsdatum.
+     *
+     * @param geburtsdatum Das Geburtsdatum des Kunden.
+     * @return Das Alter in Jahren.
+     */
+    public int calculateAge(java.time.LocalDate geburtsdatum) {
+        return java.time.Period.between(geburtsdatum, java.time.LocalDate.now()).getYears();
+    }
+
+    /**
+     * Evaluates a condition against a value.
+     *
+     * @param condition The condition to evaluate (e.g., ">=", "<", "!=").
+     * @param value     The value to compare against the condition.
+     * @return true if the condition is met, false otherwise.
+     */
+    private boolean evaluateCondition(String condition, BigDecimal value) {
+        if (condition == null || condition.trim().equals("--") || condition.trim().isEmpty()) {
+            return true; // Keine Bedingung vorhanden ⇒ immer OK
+        }
+
+        condition = condition.trim();
+
+        // Operator extrahieren (z. B. ">=", "<", "!=" usw.)
+        String operator = condition.replaceAll("[0-9]", "").trim();
+        String zahlTeil = condition.replaceAll("[^0-9]", "").trim();
+
+        // Wenn keine Zahl vorhanden → Fehler vermeiden
+        if (zahlTeil.isEmpty()) {
+            return true; // Lieber OK statt crashen
+        }
+
+        BigDecimal vergleichswert = new BigDecimal(zahlTeil);
+
+        return switch (operator) {
+            case "=" -> value.compareTo(vergleichswert) == 0;
+            case "!=" -> value.compareTo(vergleichswert) != 0;
+            case "<" -> value.compareTo(vergleichswert) < 0;
+            case "<=" -> value.compareTo(vergleichswert) <= 0;
+            case ">" -> value.compareTo(vergleichswert) > 0;
+            case ">=" -> value.compareTo(vergleichswert) >= 0;
+            default -> true; // Unbekannter Operator = kein Blocker
+        };
+    }
 }
