@@ -23,9 +23,9 @@ import java.io.File;
 import java.math.BigDecimal;
 
 @FixMethodOrder(MethodSorters.NAME_ASCENDING)
-public class VersicherungServiceJavaTestDao {
+public class VersicherungServiceDaoJavaTest {
 
-    private static final Logger L = LoggerFactory.getLogger(VersicherungServiceJavaTestDao.class);
+    private static final Logger L = LoggerFactory.getLogger(VersicherungServiceDaoJavaTest.class);
     private static IDatabaseConnection dbTesterCon = null;
 
     private static IVersicherungService vService;
