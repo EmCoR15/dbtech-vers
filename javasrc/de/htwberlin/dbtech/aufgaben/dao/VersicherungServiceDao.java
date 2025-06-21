@@ -12,6 +12,10 @@ public class VersicherungServiceDao implements IVersicherungService {
     private IVertragDao vertragDao;
     private IDeckungsartDao deckungsartDao;
 
+    public VersicherungServiceDao(Connection connection) {
+        setConnection(connection);
+    }
+
     public void setConnection(Connection connection) {
         this.connection = connection;
         this.deckungDao = new DeckungDao(connection);
